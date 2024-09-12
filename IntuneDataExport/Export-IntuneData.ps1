@@ -7,18 +7,18 @@ See LICENSE in the project root for license information.
 ####################################################
 
 param(
-    [Parameter(HelpMessage = "Azure AD Username", Mandatory = $true)]
+    [Parameter(HelpMessage = "Entra ID Username", Mandatory = $true)]
     [string]
     $Username,
     [Parameter(HelpMessage = "User principal name to export data for", Mandatory = $true)]
     [string]
     $Upn,
-    [Parameter(HelpMessage = "Include AzureAD data in export")]
+    [Parameter(HelpMessage = "Include EntraID data in export")]
     [switch]
-    $IncludeAzureAD,
-    [Parameter(HelpMessage = "Include data For Non Azure AD Upn in export")]
+    $IncludeEntraID,
+    [Parameter(HelpMessage = "Include data For Non Entra ID Upn in export")]
     [switch]
-    $IncludeNonAzureADUpn,
+    $IncludeNonEntraIDUpn,
     [Parameter(HelpMessage = "Include all data in the export")]
     [switch]
     $All,
@@ -73,8 +73,7 @@ function Log-FatalError($message) {
 
 ####################################################
 
-function Get-AuthToken {
-
+function Test-GraphSession {
     <#
     .SYNOPSIS
     This function is used to authenticate with the Graph API REST interface
@@ -91,135 +90,62 @@ function Get-AuthToken {
     
     param
     (
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory = $true)]
         $User
     )
     
-    $userUpn = New-Object "System.Net.Mail.MailAddress" -ArgumentList $User
+    Write-Host "Checking for Microsoft.Graph.Beta module..."
+    try {
+        $GraphModule = Get-Module -Name "Microsoft.Graph.Beta" -ListAvailable
+        $Scopes = @("User.Read.All", "DeviceManagementManagedDevices.Read.All", "DeviceManagementConfiguration.Read.All", "DeviceManagementApps.Read.All", "DeviceManagementServiceConfig.Read.All")
     
-    $tenant = $userUpn.Host
-    
-    Write-Host "Checking for AzureAD module..."
-    
-        $AadModule = Get-Module -Name "AzureAD" -ListAvailable
-    
-        if ($AadModule -eq $null) {
-    
-            Write-Host "AzureAD PowerShell module not found, looking for AzureADPreview"
-            $AadModule = Get-Module -Name "AzureADPreview" -ListAvailable
-    
-        }
-    
-        if ($AadModule -eq $null) {
+        if ($null -eq $GraphModule) {
             write-host
-            write-host "AzureAD Powershell module not installed..." -f Red
-            write-host "Install by running 'Install-Module AzureAD' or 'Install-Module AzureADPreview' from an elevated PowerShell prompt" -f Yellow
+            write-host "Microsoft Graph Beta PowerShell SDK module not installed..." -f Red
+            write-host "Install by running 'Install-Module Microsoft.Graph.Beta' from an elevated PowerShell prompt" -f Yellow
             write-host "Script can't continue..." -f Red
             write-host
             exit
         }
-    
-    # Getting path to ActiveDirectory Assemblies
-    # If the module count is greater than 1 find the latest version
-    
-        if($AadModule.count -gt 1){
-    
-            $Latest_Version = ($AadModule | select version | Sort-Object)[-1]
-    
-            $aadModule = $AadModule | ? { $_.version -eq $Latest_Version.version }
-    
-                # Checking if there are multiple versions of the same module found
-    
-                if($AadModule.count -gt 1){
-    
-                $aadModule = $AadModule | select -Unique
-    
-                }
-    
-            $adal = Join-Path $AadModule.ModuleBase "Microsoft.IdentityModel.Clients.ActiveDirectory.dll"
-            $adalforms = Join-Path $AadModule.ModuleBase "Microsoft.IdentityModel.Clients.ActiveDirectory.Platform.dll"
-    
-        }
-    
-        else {
-    
-            $adal = Join-Path $AadModule.ModuleBase "Microsoft.IdentityModel.Clients.ActiveDirectory.dll"
-            $adalforms = Join-Path $AadModule.ModuleBase "Microsoft.IdentityModel.Clients.ActiveDirectory.Platform.dll"
-    
-        }
-    
-    [System.Reflection.Assembly]::LoadFrom($adal) | Out-Null
-    
-    [System.Reflection.Assembly]::LoadFrom($adalforms) | Out-Null
-    
-    # Using this authentication method requires a clientID.  Register a new app in the Entra ID admin center to obtain a clientID.  More information
-    # on app registration and clientID is available here: https://learn.microsoft.com/entra/identity-platform/quickstart-register-app 
+        elseif ($null -ne $GraphModule) {
+            write-host "Microsoft Graph PowerShell SDK module found..." -f Green
+            #Check if user is already logged in
+            $User = $User.ToLowerInvariant()
+            $SessionDetails = Get-MgContext
 
-    $clientId = "<replace with your clientID>"
-    
-    $redirectUri = "urn:ietf:wg:oauth:2.0:oob"
-    
-    $resourceAppIdURI = "https://graph.microsoft.com"
-    
-    $authority = "https://login.microsoftonline.com/$Tenant"
-    
-        try {
-    
-        $authContext = New-Object "Microsoft.IdentityModel.Clients.ActiveDirectory.AuthenticationContext" -ArgumentList $authority
-    
-        # https://msdn.microsoft.com/en-us/library/azure/microsoft.identitymodel.clients.activedirectory.promptbehavior.aspx
-        # Change the prompt behaviour to force credentials each time: Auto, Always, Never, RefreshSession
-    
-        $platformParameters = New-Object "Microsoft.IdentityModel.Clients.ActiveDirectory.PlatformParameters" -ArgumentList "Auto"
-    
-        $userId = New-Object "Microsoft.IdentityModel.Clients.ActiveDirectory.UserIdentifier" -ArgumentList ($User, "OptionalDisplayableId")
-
-        $MethodArguments = [Type[]]@("System.String", "System.String", "System.Uri", "Microsoft.IdentityModel.Clients.ActiveDirectory.PromptBehavior", "Microsoft.IdentityModel.Clients.ActiveDirectory.UserIdentifier")
-        $NonAsync = $AuthContext.GetType().GetMethod("AcquireToken", $MethodArguments)
-    
-        if ($NonAsync -ne $null) {
-            $authResult = $authContext.AcquireToken($resourceAppIdURI, $clientId, [Uri]$redirectUri, [Microsoft.IdentityModel.Clients.ActiveDirectory.PromptBehavior]::Auto, $userId)
-        } else {
-            $authResult = $authContext.AcquireTokenAsync($resourceAppIdURI, $clientId, [Uri]$redirectUri, $platformParameters, $userId).Result 
-        }
-    
-            # If the accesstoken is valid then create the authentication header
-    
-            if($authResult.AccessToken){
-    
-            # Creating header for Authorization token
-    
-            $authHeader = @{
-                'Content-Type'='application/json'
-                'Authorization'="Bearer " + $authResult.AccessToken
-                'ExpiresOn'=$authResult.ExpiresOn
+            if ($null -eq $SessionDetails) {
+                write-host
+                write-host "User not logged in..." -f Red
+                write-host "Please login using 'Connect-MgGraph' prior to running this script. See here for more information: https://learn.microsoft.com/en-us/powershell/microsoftgraph/authentication-commands?view=graph-powershell-1.0" -f Yellow
+                write-host "Script can't continue..." -f Red
+                write-host
+                exit
+            }
+            foreach ($Permission in $Scopes) {
+                if ($SessionDetails.Scopes -notcontains $Permission) {
+                    write-host
+                    write-host "User not logged in with required permissions..." -f Red
+                    write-host "Please login using 'Connect-MgGraph' with the following scopes: User.Read.All, DeviceManagementManagedDevices.Read.All, DeviceManagementConfiguration.Read.All, DeviceManagementApps.Read.All, DeviceManagementServiceConfig.Read.All" -f Yellow
+                    write-host "Script can't continue..." -f Red
+                    write-host
+                    exit
                 }
-    
-            return $authHeader
-    
             }
-    
-            else {
-    
             Write-Host
-            Write-Host "Authorization Access Token is null, please re-run authentication..." -ForegroundColor Red
-            Write-Host
-            break
-    
-            }
-    
+            write-host "User already logged in..." -f Green
+            write-host
+            Write-Host "Required permissions found..." -f Green
+            write-host
         }
-    
-        catch {
-    
+    }
+    catch {
         write-host $_.Exception.Message -f Red
         write-host $_.Exception.ItemName -f Red
         write-host
         break
-    
-        }
-    
     }
+    
+}
     
 ####################################################
 
@@ -228,19 +154,16 @@ function Get-MsGraphObject($Path, [switch]$IgnoreNotFound) {
     Log-Verbose "GET $FullUri"
 
     try {
-        return  Invoke-RestMethod -Method Get -Uri $FullUri -Headers $AuthHeader
+        return  Invoke-MgGraphRequest -Method GET -Uri $FullUri 
     } 
     catch {
         $Response = $_.Exception.Response
         if ($IgnoreNotFound -and $Response.StatusCode -eq "NotFound") {
             return $null
         }
-        $ResponseStream = $Response.GetResponseStream()
-        $ResponseReader = New-Object System.IO.StreamReader $ResponseStream
-        $ResponseContent = $ResponseReader.ReadToEnd()
         Log-Error "Request Failed: $($_.Exception.Message)`n$($_.ErrorDetails)"
         Log-Error "Request URL: $FullUri"
-        Log-Error "Response Content:`n$ResponseContent"
+        Log-Error "Response Content:`n$_"
         break
     }
 }
@@ -255,17 +178,14 @@ function Get-MsGraphCollection($Path) {
     do {
         try {
             Log-Verbose "GET $NextLink"
-            $Result = Invoke-RestMethod -Method Get -Uri $NextLink -Headers $AuthHeader
+            $Result = Invoke-MgGraphRequest -Method Get -Uri $NextLink 
             $Collection += $Result.value
             $NextLink = $Result.'@odata.nextLink'
         } 
         catch {
-            $ResponseStream = $_.Exception.Response.GetResponseStream()
-            $ResponseReader = New-Object System.IO.StreamReader $ResponseStream
-            $ResponseContent = $ResponseReader.ReadToEnd()
             Log-Error "Request Failed: $($_.Exception.Message)`n$($_.ErrorDetails)"
             Log-Error "Request URL: $NextLink"
-            Log-Error "Response Content:`n$ResponseContent"
+            Log-Error "Response Content:`n$_"
             break
         }
     } while ($NextLink -ne $null)
@@ -287,16 +207,13 @@ function Post-MsGraphObject($Path, $RequestBody) {
         Log-Verbose "Request Body Json:"
         Log-Verbose $RequestBodyJson
 
-        $Result = Invoke-RestMethod -Method Post -Uri $FullUri -Headers $AuthHeader -Body $RequestBodyJson
+        $Result = Invoke-MgGraphRequest-Method Post -Uri $FullUri -Body $RequestBodyJson
         return $Result
     } 
     catch {
-        $ResponseStream = $_.Exception.Response.GetResponseStream()
-        $ResponseReader = New-Object System.IO.StreamReader $ResponseStream
-        $ResponseContent = $ResponseReader.ReadToEnd()
         Log-Error "Request Failed: $($_.Exception.Message)`n$($_.ErrorDetails)"
         Log-Error "Request URL: $NextLink"
-        Log-Error "Response Content:`n$ResponseContent"
+        Log-Error "Response Content:`n$_"
         break
     }
 }
@@ -304,7 +221,7 @@ function Post-MsGraphObject($Path, $RequestBody) {
 ####################################################
 
 function Get-User {
-    Log-Info "Getting Azure AD User data for UPN $UPN"
+    Log-Info "Getting Entra ID User data for UPN $UPN"
     return Get-MsGraphObject "users/$Upn" -IgnoreNotFound
 }
 
@@ -316,7 +233,7 @@ function Test-IntuneUser {
     Log-Info "Checking if User $UPN is a Microsoft Intune user"
 
     try {
-        Invoke-RestMethod -Method Get -Uri "https://$MsGraphHost/$MsGraphVersion/users/$($UserId)/managedDevices" -Headers $AuthHeader
+        Invoke-MgGraphRequest-Method Get -Uri "https://$MsGraphHost/$MsGraphVersion/users/$($UserId)/managedDevices" 
     } 
     catch {
         $Response = $_.Exception.Response
@@ -331,14 +248,14 @@ function Test-IntuneUser {
 ####################################################
 
 function Get-GroupMemberships {
-    Log-Info "Getting Azure AD Group memberships for User $UPN"
+    Log-Info "Getting Entra ID Group memberships for User $UPN"
     return Get-MsGraphCollection "users/$Upn/memberOf/microsoft.graph.group"
 }
 
 ####################################################
 
 function Get-RegisteredDevices {
-    Log-Info "Getting Azure AD Registered Devices for User $UPN"
+    Log-Info "Getting Entra ID Registered Devices for User $UPN"
     return Get-MsGraphCollection "users/$Upn/registeredDevices"
 }
 
@@ -358,7 +275,7 @@ function Get-ManagedDevices {
 
         $DeviceConfigurationStates = Get-MsGraphCollection "deviceManagement/managedDevices/$($Device.id)/deviceConfigurationStates"
 
-        $ApplicableDeviceConfigurationStates = @($DeviceConfigurationStates | Where-Object {$_.state -ne "notApplicable"})
+        $ApplicableDeviceConfigurationStates = @($DeviceConfigurationStates | Where-Object { $_.state -ne "notApplicable" })
 
         foreach ($ApplicableDeviceConfigurationState in $ApplicableDeviceConfigurationStates) {
             $ApplicableDeviceConfigurationState.settingStates = @(Get-MsGraphCollection "deviceManagement/managedDevices/$($Device.id)/deviceConfigurationStates/$($ApplicableDeviceConfigurationState.id)/settingStates")
@@ -370,7 +287,7 @@ function Get-ManagedDevices {
         }
         $DeviceCompliancePolicyStates = Get-MsGraphCollection "deviceManagement/managedDevices/$($Device.id)/deviceCompliancePolicyStates"
 
-        $ApplicableDeviceCompliancePolicyStates = @($DeviceCompliancePolicyStates | Where-Object {$_.state -ne "notApplicable"})
+        $ApplicableDeviceCompliancePolicyStates = @($DeviceCompliancePolicyStates | Where-Object { $_.state -ne "notApplicable" })
         foreach ($ApplicableDeviceCompliancePolicyState in $ApplicableDeviceCompliancePolicyStates) {
             $ApplicableDeviceCompliancePolicyState.settingStates = @(Get-MsGraphCollection "deviceManagement/managedDevices/$($Device.id)/deviceCompliancePolicyStates/$($ApplicableDeviceCompliancePolicyState.id)/settingStates")
         }
@@ -399,7 +316,7 @@ function Get-AuditEvents {
 function Get-ManagedAppRegistrations {
     Log-Info "Getting managed app registrations for User $UPN"
     
-    return Get-MsGraphCollection "`users/$UserId/managedAppRegistrations?`$expand=appliedPolicies,intendedPolicies,operations"
+    return Get-MsGraphCollection "users/$UserId/managedAppRegistrations?`$expand=appliedPolicies,intendedPolicies,operations"
 }
 
 ####################################################
@@ -420,59 +337,42 @@ function Get-AppleDepSettings {
 
 ####################################################
 
-function Has-UserStatus($InstallSummary) {
-    return ($InstallSummary.installedUserCount -gt 0) -or 
-    ($InstallSummary.failedUserCount -gt 0) -or 
-    ($InstallSummary.notApplicableUserCount -gt 0) -or 
-    ($InstallSummary.notInstalledUserCount -gt 0) -or 
-    ($InstallSummary.pendingInstallUserCount -gt 0)
-}
-
-####################################################
-
 function Get-AppInstallStatuses {
     Log-Info "Getting App Install Statuses for User $UPN"
-
-    $Url = "deviceAppManagement/mobileApps?`$expand=installSummary"
-
-    if (-not $All) {
-        $Url += "&`$select=id,displayName,publisher,privacyInformationUrl,informationUrl,owner,developer"
-    }
-
-    $Apps = Get-MsGraphCollection $Url
-    # Filter the list of apps to only the apps that have install status
-    $AppsWithStatus = $Apps | Where-Object { Has-UserStatus $_.installSummary }
-    Log-Verbose "Found $($AppsWithStatus.Count) apps with install statuses"
-
+    
     $AppStatuses = @()
+    $AppCount = 0
+    $DevicesContainer = @()
 
-    foreach ($App in $AppsWithStatus) {
-        Log-Verbose "Getting App Install Status for App '$($App.displayName) $($App.Id)"
-
-        $UserStatusesForApp = Get-MsGraphCollection "deviceAppManagement/mobileApps/$($App.id)/userStatuses"
-        $DeviceStatusesForApp = Get-MsGraphCollection "deviceAppManagement/mobileApps/$($App.id)/deviceStatuses" 
-        $DeviceStatusesForUser = @()
-        $DeviceStatusesForUser += $DeviceStatusesForApp | Where-Object { 
-            $_.userPrincipalName -ieq $UPN
+    foreach ($Device in $ManagedDevices) {
+        $DeviceContainer = @{}
+        $DeviceId = [string]$Device.id
+        $AppStatusesByDevice = Get-MsGraphObject "users('$UserId')/mobileAppIntentAndStates('$DeviceId')"
+        $AppsContainer = @()
+        foreach ($App in $AppStatusesByDevice.mobileAppList) {
+            $AppContainer = @{}
+            $AppMetaData = Get-MsGraphObject "deviceAppManagement/mobileApps/$($App.applicationId)?`$select=id,displayName,publisher,privacyInformationUrl,informationUrl,owner,developer"
+            $AppContainer.applicationId = $App.applicationId
+            $AppContainer.installState = $App.installState
+            $AppContainer.mobileAppIntent = $App.mobileAppIntent
+            $AppContainer.displayVersion = $App.displayVersion
+            $AppContainer.displayName = $AppMetaData.displayName
+            $AppContainer.publisher = $AppMetaData.publisher
+            $AppContainer.privacyInformationUrl = $AppMetaData.privacyInformationUrl
+            $AppContainer.informationUrl = $AppMetaData.informationUrl
+            $AppContainer.owner = $AppMetaData.owner
+            $AppContainer.developer = $AppMetaData.developer
+            $AppsContainer += $AppContainer
+            $AppCount++
         }
-
-        $UserStatusesForUser = @()
-        $UserStatusesForUser += $UserStatusesForApp | Where-Object { 
-            $_.userPrincipalName -ieq $UPN
-        }
-        
-        if ($UserStatusesForUser.Count -gt 0 -or $DeviceStatusesForUser.Count -gt 0) {
-            Add-Member NoteProperty -InputObject $App -Name "deviceStatuses" -Value @()
-            foreach ($UserStatus in $DeviceStatusesForUser) {
-                $App.deviceStatuses += $UserStatus
-            }
-            Add-Member NoteProperty -InputObject $App -Name "userStatuses" -Value @()
-            foreach ($UserStatus in $UserStatusesForUser) {
-                $App.userStatuses += $UserStatus
-            }
-            $AppStatuses += $App
-        }
+        $DeviceContainer | Add-Member -MemberType NoteProperty -Name "deviceId" -Value $DeviceId
+        $DeviceContainer | Add-Member -MemberType NoteProperty -Name "deviceName" -Value $Device.deviceName
+        $DeviceContainer | Add-Member -MemberType NoteProperty -Name "installedApps" -Value $AppsContainer
+        $DevicesContainer += $DeviceContainer
+        $AppStatuses = $DevicesContainer
     }
+
+    Log-Info "Found $($AppCount) app install statuses across $($ManagedDevices.Count) managed devices"
 
     return $AppStatuses
 }
@@ -547,7 +447,7 @@ function Get-RemoteActionAudits {
     Log-Info "Getting Remote Action Audits for User $UPN"
 
     $RemoteActionAudits = Get-MsGraphCollection "deviceManagement/remoteActionAudits?`$filter=initiatedByUserPrincipalName eq '$UPN'"
-    return $RemoteActionAudits | Where-Object { $_.initiatedByUserPrincipalName -ieq $UPN -or $_.userName -ieq $UPN}
+    return $RemoteActionAudits | Where-Object { $_.initiatedByUserPrincipalName -ieq $UPN -or $_.userName -ieq $UPN }
 }
 
 ####################################################
@@ -604,7 +504,7 @@ function Get-ManagedDeviceMobileAppConfigurationStatuses ($Devices) {
 
 ####################################################
 
-function Get-DeviceManagementScriptRunStates ($ManagedDevices){
+function Get-DeviceManagementScriptRunStates ($ManagedDevices) {
     Log-Info "Getting Device Management Script Run States for user $UPN"
     $DeviceManagementScripts = Get-MsGraphCollection "deviceManagement/deviceManagementScripts"
     $DeviceManagementScriptRunStates = @()
@@ -628,22 +528,18 @@ function Get-DeviceManagementScriptRunStates ($ManagedDevices){
 
 ####################################################
 
-function Export-RemainingData{
+function Export-RemainingData {
     Log-Info "Getting other data for user $Upn"
 
     $OtherData = Get-MsGraphCollection "users/$Upn/exportDeviceAndAppManagementData()/content"
     if ($OtherData.Count -gt 0) {
-        foreach ($DataItem in $OtherData)
-        {
-            if ($DataItem.data -ne $null)
-            {
+        foreach ($DataItem in $OtherData) {
+            if ($DataItem.data -ne $null) {
                 $Entities = @($DataItem.data)
-                if ($Entities.Count -gt 0) 
-                {
+                if ($Entities.Count -gt 0) {
                     Log-Info "Found $($Entities.Count) $($DataItem.displayName)"
                     $CollectionName = $DataItem.displayName
-                    if ($CollectionName -ieq "Users")
-                    {
+                    if ($CollectionName -ieq "Users") {
                         $CollectionName = "Intune Users"
                     }
                     $EntityName = $CollectionName.TrimEnd('s')
@@ -666,15 +562,6 @@ function Get-AppProtectionUserStatuses {
     $Status = Get-MsGraphObject "deviceAppManagement/managedAppStatuses('userstatus')?userId=$UserId"
 
     return $Status
-}
-
-####################################################
-
-function Get-WindowsProtectionSummary {
-    Log-Info "Getting Windows Protection Summary for user $UPN"
-    $ProtectionSummary = Get-MsGraphObject "deviceAppManagement/managedAppStatuses('windowsprotectionreport')"
-
-    return Filter-ManagedAppReport $ProtectionSummary
 }
 
 ####################################################
@@ -712,20 +599,18 @@ function Get-ManagedAppConfigurationStatusReport {
 function Filter-ManagedAppReport {
     param($Report)
     #Filter the report summary to only the target user
-    if ($Report -ne $null -and $Report.content -ne $null)
-    {
+    if ($Report -ne $null -and $Report.content -ne $null) {
         $HeaderCount = $Report.content.header.Count
         $DataRows = $Report.content.body.values
         $FilteredDataRows = @()
 
-        if ($DataRows.Count -eq $HeaderCount) 
-        {
+        if ($DataRows.Count -eq $HeaderCount) {
             # Special case for only one row of data
-            if ($DataRows[0]  -ieq $UserId)
-            {
+            if ($DataRows[0] -ieq $UserId) {
                 $FilteredDataRows += @($DataRows)
             }
-        } elseif ($DataRows -ne $null -and $DataRows.Count -gt 0) {
+        }
+        elseif ($DataRows -ne $null -and $DataRows.Count -gt 0) {
             foreach ($DataRow in $DataRows) {
                 if ($DataRow[0] -ieq $UserId) {
                     $FilteredDataRows += $DataRow
@@ -783,7 +668,7 @@ function Export-IntuneReportUsingGraph($RequestBody, $ZipName) {
     }
 
     $IntuneReportOutFile = $OutputPath + "/" + $ZipName + ".zip"
-    $DownloadZipFile = Invoke-RestMethod -Method Get -Uri $IntuneReportDataGETResponse.url -ContentType "application/zip" -Outfile $IntuneReportOutFile
+    $DownloadZipFile = Invoke-MgGraphRequest-Method Get -Uri $IntuneReportDataGETResponse.url -ContentType "application/zip" -Outfile $IntuneReportOutFile
     Log-Verbose "Zip file downloaded to $IntuneReportOutFile"
 }
 
@@ -795,10 +680,10 @@ function Export-ChromeOSDeviceReportData {
     $FilterString = "(MostRecentUserEmail eq '" + $UPN + "')"
 
     $ChromeRequestBody = @{ 
-        reportName = "ChromeOSDevices"
+        reportName       = "ChromeOSDevices"
         localizationType = "LocalizedValuesAsAdditionalColumn"
-        filter = $FilterString
-        format = "json"
+        filter           = $FilterString
+        format           = "json"
     }
 
     Export-IntuneReportUsingGraph $ChromeRequestBody "ChromeOSDeviceReport"
@@ -827,28 +712,25 @@ function Export-ObjectCSV($ObjectType, $Object) {
 
 function Export-ObjectXML($ObjectType, $Object) {
     Log-Info "Writing $ObjectType data to $(Join-Path $OutputPath "$ObjectType.xml")"
-    $Object | ConvertTo-XML -Depth 20 -NoTypeInformation -As String| Out-File -Encoding utf8 -FilePath (Join-Path $OutputPath "$ObjectType.xml")
+    $Object | ConvertTo-XML -Depth 20 -NoTypeInformation -As String | Out-File -Encoding utf8 -FilePath (Join-Path $OutputPath "$ObjectType.xml")
 }
 
 ####################################################
 
-function Export-Object ($ObjectType, $Object){
+function Export-Object ($ObjectType, $Object) {
     Log-Info "Exporting data for $ObjectType ID:$($Object.id)"
 
     if (-not $All) {
         Filter-Entity -EntityName $ObjectType -Entity $Object
     }
 
-    if ($ExportFormat -eq "CSV")
-    {
+    if ($ExportFormat -eq "CSV") {
         Export-ObjectCsv $ObjectType $Object
     }
-    if ($ExportFormat -eq "JSON")
-    {
+    if ($ExportFormat -eq "JSON") {
         Export-ObjectJson $ObjectType $Object
     }
-    if ($ExportFormat -eq "XML")
-    {
+    if ($ExportFormat -eq "XML") {
         Export-ObjectXML $ObjectType $Object
     }
 }
@@ -865,20 +747,17 @@ function Export-Collection ($CollectionType, $ObjectType, $Collection) {
         $Collection | ForEach-Object { Filter-Entity -EntityName $ObjectType -Entity $_ }
     }
 
-    if ($ExportFormat -eq "JSON")
-    {
+    if ($ExportFormat -eq "JSON") {
         $ExportPath = (Join-Path $OutputPath "$CollectionType.json")
         $Collection | ConvertTo-Json -Depth 20 | Out-File -Encoding utf8 -FilePath $ExportPath
         Log-Info "Exported $($Collection.Count) $CollectionType to $ExportPath"
     }
-    if ($ExportFormat -eq "XML")
-    {
+    if ($ExportFormat -eq "XML") {
         $ExportPath = (Join-Path $OutputPath "$CollectionType.xml")
-        $Collection | ConvertTo-XML -Depth 20 -NoTypeInformation -As String| Out-File -Encoding utf8 -FilePath $ExportPath
+        $Collection | ConvertTo-XML -Depth 20 -NoTypeInformation -As String | Out-File -Encoding utf8 -FilePath $ExportPath
         Log-Info "Exported $($Collection.Count) $CollectionType to $ExportPath"
     }
-    if ($ExportFormat -eq "CSV")
-    {
+    if ($ExportFormat -eq "CSV") {
         $ExportPath = (Join-Path $OutputPath "$CollectionType.csv")
         $Collection | Export-Csv -NoTypeInformation -Path $ExportPath -Encoding utf8 
         Log-Info "Exported $($Collection.Count) $CollectionType to $ExportPath"
@@ -940,8 +819,8 @@ function Filter-Entity {
         Add-Member -MemberType NoteProperty -InputObject $Entity -Name $NewPropertyName -Value $PropertyValue
     }
 
-    $NestedArrays = @($Entity | Get-Member -MemberType NoteProperty | Where-Object { $_.Definition.StartsWith("Object[]")})
-    $NestedObjects = @($Entity | Get-Member -MemberType NoteProperty | Where-Object { $_.Definition.StartsWith("System.Management.Automation.PSCustomObject")})
+    $NestedArrays = @($Entity | Get-Member -MemberType NoteProperty | Where-Object { $_.Definition.StartsWith("Object[]") })
+    $NestedObjects = @($Entity | Get-Member -MemberType NoteProperty | Where-Object { $_.Definition.StartsWith("System.Management.Automation.PSCustomObject") })
 
     foreach ($NestedArray in $NestedArrays) {
         $Array = $Entity."$($NestedArray.Name)"
@@ -957,6 +836,8 @@ function Filter-Entity {
         Filter-Entity -EntityName "$EntityName.$($NestedObject.Name)" -Entity $Object
     }
 }
+
+Test-GraphSession $Username
 
 ####################################################
 
@@ -975,7 +856,8 @@ Log-Verbose "Loading configuration from $ConfigurationFile"
 
 if (Test-Path $ConfigurationFile) {
     $ExportConfiguration = (Get-Content $ConfigurationFile | ConvertFrom-Json)
-} else {
+}
+else {
     Log-Warning "Configuration file $ConfigurationFile not found"
 }
 
@@ -987,30 +869,25 @@ Log-Info "Exporting user data for user $Upn to $OutputPath"
 
 if ($All) {
     Log-Info "All data will be exported"
-} elseif ($IncludeAzureAD) {
-    Log-Info "Including AzureAD data in export"
+}
+elseif ($IncludeEntraID) {
+    Log-Info "Including EntraID data in export"
 } 
 
 ####################################################
 
-$AuthHeader = Get-AuthToken -User $Username
+# Get Data for Non EntraID UPN (if requested)
 
-####################################################
-
-# Get Data for Non AzureAD UPN (if requested)
-
-if ($IncludeNonAzureADUpn -or $All) {
+if ($IncludeNonEntraIDUpn -or $All) {
     Export-ChromeOSDeviceReportData
 }
 
-
 ####################################################
-
 
 $User = Get-User
 
 if ($User -eq $null) {
-    Log-Warning "Azure AD User with UPN $UPN was not found"
+    Log-Warning "Entra ID User with UPN $UPN was not found"
     return
 }
 
@@ -1029,14 +906,14 @@ Log-Info "User is a valid Microsoft Intune user"
 
 ####################################################
 
-if ($IncludeAzureAD -or $All) {
-    Export-Object "Azure AD User" $User
+if ($IncludeEntraID -or $All) {
+    Export-Object "Entra ID User" $User
 
     $Groups = Get-GroupMemberships
-    Export-Collection "Azure AD Groups" "Azure AD Group" $Groups
+    Export-Collection "Entra ID Groups" "Entra ID Group" $Groups
 
     $Groups = Get-RegisteredDevices
-    Export-Collection "Azure AD Registered Devices" "Azure AD Registered Device" $Groups
+    Export-Collection "Entra ID Registered Devices" "Entra ID Registered Device" $Groups
 }
 
 ####################################################
@@ -1074,7 +951,7 @@ Export-Collection "DeviceManagementTroubleshootingEvents" "DeviceManagementTroub
 $IosUpdateStatues = Get-IosUpdateStatuses
 Export-Collection "iOSUpdateStatus" "iOSUpdateStatuses" $IosUpdateStatues
 
-$ManagedDeviceMobileAppConfigurationStatuses = Get-ManagedDeviceMobileAppConfigurationStatuses  $ManagedDevices
+$ManagedDeviceMobileAppConfigurationStatuses = Get-ManagedDeviceMobileAppConfigurationStatuses $ManagedDevices
 Export-Collection "MobileAppConfigurationStatuses" "MobileAppConfigurationStatus" $ManagedDeviceMobileAppConfigurationStatuses
 
 $DeviceManagementScriptRunStates = Get-DeviceManagementScriptRunStates 
@@ -1082,9 +959,6 @@ Export-Collection "DeviceManagementScriptRunState" "DeviceManagementScriptRunSta
 
 $AppProtectionUserStatus = Get-AppProtectionUserStatuses
 Export-Object "ManagedAppProtectionStatusReport" $AppProtectionUserStatus
-
-$WindowsProtectionSummary = Get-WindowsProtectionSummary
-Export-Object "WindowsProtectionSummary" $WindowsProtectionSummary
 
 $ManagedAppUsageSummary = Get-ManagedAppUsageSummary
 Export-Object "ManagedAppUsageSummary" $ManagedAppUsageSummary
